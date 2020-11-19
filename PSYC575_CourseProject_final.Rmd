@@ -1,0 +1,445 @@
+---
+title: "PSYC575 Course Project"
+author: "Qianhui (Vicky) Ni"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Load packages
+
+```{r load-pkg, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(psych)
+library(lme4)
+library(broom.mixed)
+library(brms)
+library(modelsummary)
+library(haven)  # for importing SPSS/SAS/Stata data
+library(lmerTest)  # for testing coefficients
+library(MuMIn)  # for R^2
+library(lattice)  # for dotplot (working with lme4)
+library(ggplot2)
+library(sjPlot)  # for plotting effects
+library(psych)
+library(emmeans)
+library(tidybayes)
+# Add the following so that the LOO will be included in the msummary table
+glance_custom.brmsfit <- function(x) {
+  broom.mixed::glance(x, looic = TRUE)
+}
+theme_set(theme_bw())  # Theme; just my personal preference
+```
+
+## 2. Import Data
+
+```{r data-import}
+setwd("/Users/qianhuini/Desktop/USC/Study/2020 Fall/575_Multilevel Modeling/575_project")
+ToM_dat <- read.csv("ELdataset.csv")
+head(ToM_dat)
+```
+For data storage needs, the name of each column is slightly modified. The "+" and "-" in the original dataset are changed to "p" for presence and "a ' for absence.  
+
+## 3. Descriptive statistics
+
+```{r descriptive}
+ds1 <- describe(ToM_dat)
+ds1
+```
+
+## 4. Data Preprocessing  
+
+The original dataset is in wide-format and with `rt` and `err` together, so I break it into two subsets and then transform them to long-format. Log transformation is also performed for the variable `rt`. There are two predictions: `Task` and `Condition`, so I will separate them too during the transformation. Each participant experienced all 8 situations, and these situations differ in their task type and condition type.   
+
+```{r pre}
+# Seperate into two subsets
+ToM_rt_wide <- ToM_dat[,1:9]
+ToM_err_wide <- ToM_dat[,c(1,10:17)]
+# Covert to long-format dataset
+ToM_rt <- ToM_rt_wide %>% 
+  pivot_longer(
+    cols = RT_ID_AD_p:RT_LO_AU_a,  
+    names_to = "Condition",  
+    names_prefix = "rt",  
+    values_to = "rt",)
+ToM_rt$Task <- substring(ToM_rt$Condition, 4,5)
+ToM_rt$Condition <- sub('^......','',ToM_rt$Condition)
+
+ToM_err <- ToM_err_wide %>% 
+  pivot_longer(
+    cols = ERR_ID_AD_p:ERR_LO_AU_a,  
+    names_to = "Condition",  
+    names_prefix = "err",  
+    values_to = "err",)
+ToM_err$Task <- substring(ToM_err$Condition, 5,6)
+ToM_err$Condition <- sub('^.......','',ToM_err$Condition)
+
+# Log transformation for rt
+ToM_rt$lg_rt <- log(ToM_rt$rt)
+ToM_rt <- ToM_rt[,c(1,4,2,3,5)]
+head(ToM_rt)
+
+# Add one colume about situation
+ToM_rt$Situation <- paste(ToM_rt$Task, ToM_rt$Condition)
+ToM_rt$Situation[ToM_rt$Situation=="ID AD_p"] <- "1"
+ToM_rt$Situation[ToM_rt$Situation=="ID AU_p"] <- "2"
+ToM_rt$Situation[ToM_rt$Situation=="ID AD_a"] <- "3"
+ToM_rt$Situation[ToM_rt$Situation=="ID AU_a"] <- "4"
+ToM_rt$Situation[ToM_rt$Situation=="LO AD_p"] <- "5"
+ToM_rt$Situation[ToM_rt$Situation=="LO AU_p"] <- "6"
+ToM_rt$Situation[ToM_rt$Situation=="LO AD_a"] <- "7"
+ToM_rt$Situation[ToM_rt$Situation=="LO AU_a"] <- "8"
+
+ToM_acc <- ToM_err
+ToM_acc$Situation <- paste(ToM_acc$Task, ToM_acc$Condition)
+ToM_acc$Situation[ToM_acc$Situation=="ID AD_p"] <- "1"
+ToM_acc$Situation[ToM_acc$Situation=="ID AU_p"] <- "2"
+ToM_acc$Situation[ToM_acc$Situation=="ID AD_a"] <- "3"
+ToM_acc$Situation[ToM_acc$Situation=="ID AU_a"] <- "4"
+ToM_acc$Situation[ToM_acc$Situation=="LO AD_p"] <- "5"
+ToM_acc$Situation[ToM_acc$Situation=="LO AU_p"] <- "6"
+ToM_acc$Situation[ToM_acc$Situation=="LO AD_a"] <- "7"
+ToM_acc$Situation[ToM_acc$Situation=="LO AU_a"] <- "8"
+```
+
+### 4.1 Check speed-accuracy tradeoffs
+
+```{r speed-accuracytradeoffs}
+cor.test(ToM_rt$rt, ToM_err$err)
+```
+
+
+## 5. Analysis of Reaction Time
+
+There are two outcome variables: `rt` and `err`. They will be analyzed separately.  
+
+### 5.1 Data Exploration 
+
+```{r exploration_rt}
+pairs.panels(ToM_rt[ , -1],
+             ellipses = FALSE)
+```
+
+### 5.2 Unconditional model with random intercepts
+
+I first run an unconditional model with random intercepts of `Situation` and `Condition`. 
+
+Repeated measure (within-cell) level (Lv1):  
+$$\text{lg rt}_{i(j, k)} = \beta_{0(j, k)} + e_{ijk}$$ 
+
+Between-cell leve l(Lv2):  
+$$\beta_{0(j, k)} = \gamma_{00} + u_{0j} + v_{0k}$$
+
+```{r unconditionalmodel_rt}
+m0_rt <- lmer(lg_rt ~ (1 | Subject) + (1 | Situation), data = ToM_rt)
+vc_m0_rt <- as.data.frame(VarCorr(m0_rt))
+
+# Proportion of variance at the within-cell level
+icc_e_rt <- vc_m0_rt$vcov[3] / sum(vc_m0_rt$vcov)
+
+# ICC/Deff (Subject; cluster size = 8)
+icc_subj_rt <- vc_m0_rt$vcov[1] / sum(vc_m0_rt$vcov)
+c("ICC(subj_rt)" = icc_subj_rt, 
+  "Deff(subj_rt)" = 1 + ((8-1) * icc_subj_rt))
+
+# ICC/Deff (Situation; cluster size = 40)
+icc_situation_rt <- vc_m0_rt$vcov[2] / sum(vc_m0_rt$vcov)
+c("ICC(Situation_rt)" = icc_situation_rt, "Deff(Situation_rt)" = 1 + (40-1) * icc_situation_rt)
+
+
+c("ICC(Subject_rt + Situation_rt)" = sum(vc_m0_rt$vcov[1:2]) / sum(vc_m0_rt$vcov))
+```
+
+The results show that the ICC of `Subject` is .234 with the design effect of 2.636. This means that we can expect a correlation between two randomly drawn units from the same subject. This is quite reasonable because the same person will have a certain reaction pattern and a range of reaction times. The design effect is large, so it's necessary to use multilevel modeling. Next, the ICC of `Situation` is .077 with the design effect of 4.007. In addition, the ICC with subject and situation together is 0.311 so if we have the same participant experiencing the same situation multiple times, the responses will also be correlated.    
+The variations across subjects, and across situations are plotted as below.   
+
+```{r variation1_rt}
+# Variation across persons
+sub_ids <- unique(ToM_rt$Subject)
+(p_set <- ToM_rt %>%
+    filter(Subject %in% sub_ids) %>%  
+    ggplot(aes(x = Subject, y = lg_rt)) +
+    geom_jitter(height = 0, width = 0.1, alpha = 0.3) +
+    scale_x_continuous(breaks = sub_ids, labels = sub_ids) +
+    # Add subject means
+    stat_summary(
+      fun = "mean",
+      geom = "point",
+      col = "red",
+      shape = 17,
+      # use triangles
+      size = 4)  
+)
+```
+
+```{r variation2_rt}
+# Variation across persons
+sub_si <- unique(ToM_rt$Situation)
+(p_set <- ToM_rt %>%
+    filter(Situation %in% sub_si) %>%  
+    ggplot(aes(x = Situation, y = lg_rt)) +
+    geom_jitter(height = 0.5, width = 0.2, alpha = 0.3) +
+    scale_x_discrete(breaks = sub_si, labels = sub_si) +
+    # Add subject means
+    stat_summary(
+      fun = "mean",
+      geom = "point",
+      col = "red",
+      shape = 17,
+      # use triangles
+      size = 4)
+)
+```
+
+### 5.3 Recode the levels of each predictor  
+
+Because I am mainly interested in the interaction of LO & ID and AD+ & AU+, I now make Identity task the reference group by making the variable a factor with Identity task as the first category. For `Condition`, AD+ is the the first category.  
+
+```{r recode-ConditionTask_rt}
+ToM_rt <- ToM_rt %>% 
+  mutate(Task = factor(Task, levels = c("ID", "LO")))
+ToM_rt <- ToM_rt %>% 
+  mutate(Condition = factor(Condition, levels = c("AD_p", "AU_p","AD_a","AU_a")))
+```
+
+
+### 5.4 Modeling for `rt`
+
+#### 5.4.1 Model Equations  
+
+Repeated-Measure level (Lv 1):
+$$\text{lg rt}_{i(j, k)} = \beta_{0(j, k)} + e_{ijk}$$
+
+Between-cell (Subject x Situation) level:
+$$\beta_{0(j, k)} = \gamma_{00} + \beta_{1j} \text{Task}_{ik} + \beta_{2j} \text{Condition}_{ik} + \beta_{3j} \text{Task}_{ik} \times \text{Condition}_{ik} + u_{0j} + v_{0k}$$
+
+Subject level:
+$$\beta_{1j} = \gamma_{10} + u_{1j} \\
+  \beta_{2j} = \gamma_{20} + u_{2j} \\
+  \beta_{3j} = \gamma_{30} + u_{3j} \\$$
+
+Combined equations
+$$
+\begin{aligned}
+  \text{lg rt}_{i(j,k)} & = \gamma_{00} \\ 
+                        & + \gamma_{10} \text{Task}_{ik} + \gamma_{20} \text{Condition}_{ik} + \gamma_{30} \text{Condition}_{ik} \times \text{Task}_{ik} +  \\
+                        & + u_{0j} + u_{1j} \text{Task}_{ik} + u_{2j} \text{Condition}_{ik} + u_{3j} \text{Task}_{ik} \times \text{Condition}_{ik} \\
+                        & + v_{0k} + e_{ijk}
+\end{aligned}
+$$
+
+
+#### 5.4.2 Fit a Model
+
+To make sure that random slops are necessary, I tested them one by one.  
+
+```{r randomslopes_rt}
+# First, no random slops
+m_test_no <- lmer(lg_rt ~ Condition * Task + (1 | Subject) + (1 | Situation), data = ToM_rt)
+
+# Then test random slopes one by one
+# Random slopes of Task-Condition interaction across subjects
+m_test_1 <- lmer(lg_rt ~ Condition*Task + (Condition:Task | Subject) + (1 | Situation), data = ToM_rt)
+ranova(m_test_1)
+# Random slopes of Task (situation-level) across subjects
+m_test_2 <- lmer(lg_rt ~ Condition*Task + (Task | Subject) + (1 | Situation), data = ToM_rt)
+ranova(m_test_2)
+# Random slopes of Condition (situation-level) across subjects
+m_test_3 <- lmer(lg_rt ~ Condition*Task + (Condition | Subject) + (1 | Situation), data = ToM_rt)
+ranova(m_test_3)
+```
+
+Judgement:  
+The random slopes of of Task-Condition interaction across subjects, of Task across subjects, and of COndition across subjects are all significant. So they will be included in the final model.  
+  
+Here I fit a Bayesian multilevel model to estimate the effect of `Task` on ``rt`.  
+The multilevel models were fitted using the brms package (Bürkner, 2017) in R, which performs Markdov Chain Monte Carlo approximation with the No U-Turn Sampler to approximate the posterior distributions of the model parameters. For each model, 4 chains are used, each with 2,000 iterations (1,000 warmup). The default priors from brms were used, which include uniform non-informative priors on the fixed-effect parameters and weakly informative Student-t priors on the standard deviations of the random effects. For all model, Rhat < 1.01 (Vehtari et al., 2020), indicating convergence of the chains to a stationary posterior distributions. The posterior distributions of the model parameters are summarized using the posterior means and the 95% equal-tailed credible intervals.    
+Interaction between these two predictors and varing slopes are also included. Because of counterbalancing, there is no need for cluster-mean centering.  
+
+```{r brmfit_rt}
+m1_rt <- brm(lg_rt ~ Task + Condition + Task * Condition + 
+               (Task + Condition + Task:Condition | Subject), 
+             data = ToM_rt,
+             control = list(adapt_delta = .9), 
+             cores = 2)
+summary(m1_rt)
+msummary(m1_rt, statistic = "conf.int", statistic_vertical = FALSE)
+```
+
+#### 5.5 Plotting  
+
+```{r plot1_rt}
+m1_rt %>%
+  emmeans( ~ Condition | Task) %>%
+  gather_emmeans_draws() %>%
+  ggplot(aes(x = Condition, y = .value, fill = Task, color = Task)) +
+  stat_lineribbon(alpha = 1/4) +
+  theme_light()
+```
+
+```{r plot2_rt}
+rand_subj <- sample(unique(ToM_dat$Subject), size = 9) 
+conditional_effects(m1_rt, type = "pred", re_formula = NULL, 
+                    conditions = tibble(subj = rand_subj))
+```
+
+```{r plot3_rt}
+m1_rt %>% 
+  augment(data = ToM_rt) %>% 
+  ggplot(aes(x = Situation, y = lg_rt, group = Subject)) +
+  geom_smooth(method = "lm", se = FALSE, size = 0.5,color="darkolivegreen3")+
+  scale_x_discrete(labels=c("1" = "ID AD+", "2" = "ID AU+","3" = "ID AD-","4" = "ID AU-",
+                            "5" = "LO AD+", "6" = "LO AU+","7" = "LO AD-","8" = "LO AU-"))
+```
+
+#### 5.6 Interpretation
+
+TaskLO represents the difference between Location and Identity Task in Condition AD_p (because it is the reference group).In Condition AD_p, the difference between Location and Identity Task is significant. RTs in Location Task are shorter than in Identity Task whenparticipants experienced Condition AD_p. 
+As for condition, AU_p has the shortest reaction time in Identity Task.
+If we look at the interaction, the coefficient for [TaskLO x ConditionAU_p] represents how much the differnce between Location Task and Identity Task differs between Condition AU_p and AD_p. The CI doesn't contain 0 so the interaction we are most interested in, between COndition AD+ AU+ and Task is significant. 
+Furthermore, as we mentioned, the random slopes here are also significant. If we take a sample of 9 participants, we can see that there are many individual differences in their reaction times.
+Overall, the results of reaction time can support the hypothesis that When the actor falsely believed that a desired object was in the box, participants would be faster in Location Task than in Identity Task, while when the actor falsely believed that an undesired object was in the box, participants would be faster in Location Task than in Identity Task. This reveals the identity limits in the efficient mind-reading system.   
+
+
+
+## 6. Analysis of Accuracy
+
+### 6.1 Data Preprocessing 
+
+For each situation, each participant will be measured 10 times. In a single trial, if they judge correctly, they will get 1, if not, they will get 0. Thus, there are two methods to deal with accuracy data. The first one is use a number calculated by n/10 to represent their accuracy rate for each cell.  In this case, each participant has a score ranging from 0 to 1 for each situation. The second way is to use logistic MLM. Considering that the data is binary, and most people reacted correct in 8-9 trials out of 10 trials, I will use logistic MLM to analyze accuracy.  
+
+```{r pre_acc}
+head(ToM_acc)
+
+# Recode the levels of each predictor
+ToM_acc <- ToM_acc %>% 
+  mutate(Task = factor(Task, levels = c("ID", "LO")))
+ToM_acc <- ToM_acc %>% 
+  mutate(Condition = factor(Condition, levels = c("AD_p", "AU_p","AD_a","AU_a")))
+```
+
+
+### 6.2 Data Exploration 
+
+```{r exploration_acc}
+pairs.panels(ToM_acc[ , -1],
+             ellipses = FALSE)
+```
+
+### 6.3 Unconditional model with random intercepts
+
+First, I run an unconditional model with random intercepts of both `Subject` and `Situation`.   
+
+```{r unconditionalmodel_acc}
+m0_acc <- brm(err ~ (1 | Subject) + (1 | Situation), data = ToM_acc,
+              family = bernoulli("logit"), 
+               seed = 31420)
+
+# Calculate ICC
+post_tau <- posterior_samples(m0_acc, pars = c("sd"))
+# ICC for Subject
+icc_samples_sub <- post_tau$sd_Subject__Intercept^2 / 
+  (post_tau$sd_Subject__Intercept^2 + pi^2 / 3)
+posterior_summary(icc_samples_sub)
+# Design effect
+Deff_sub <- 1 + ((8-1) * 0.08453863)
+# ICC for Situation
+icc_samples_si <- post_tau$sd_Situation__Intercept^2 / 
+  (post_tau$sd_Situation__Intercept^2 + pi^2 / 3)
+posterior_summary(icc_samples_si)
+Deff_si <- 1 + ((40-1) * 0.09521494)
+```
+
+The results show that the ICC of `Subject` is .085 with the design effect of 1.592. There is a very week correlation between two randomly drawn units from the same subject. The ICC of `Situation` is .095 with the design effect of 4.713. This time, the correlation between two randomly drawn units from the same subject is very week.
+The distribution of accuracy and a example subset are plotted as below. 
+
+```{r variation_acc}
+cdplot(factor(ToM_acc$err) ~ ToM_acc$Subject, xlab = "Subject", ylab = "Accuracy")
+
+set.seed(31420)
+# Randomly select some subjects
+random_subjects <- sample(ToM_acc$Subject, size = 9)
+ToM_acc %>% 
+  filter(Subject %in% random_subjects) %>% 
+  mutate(err = factor(err, labels = c("incorrect", "correct"))) %>% 
+  ggplot(aes(x = err)) + 
+  geom_bar() + 
+  facet_wrap( ~ Subject, ncol = 3) + 
+  coord_flip()
+```
+
+
+### 6.5 Modeling for `acc`
+
+#### 6.5.1 Model Equations  
+
+Repeated-Measure level (Lv 1):
+
+$$
+  \begin{aligned}
+    \text{acc}_{ijk} & \sim \text{Bernoulli}(\mu_{ijk}) \\
+    \eta_{ij} & = \text{logit}(\mu_{ijk}) \\
+    \eta_{ijk} & = \beta_{0j} 
+  \end{aligned}
+$$
+
+Lv 2:
+$$\beta_{0(j, k)} = \gamma_{00} + \beta_{1j} \text{Task}_{ik} + \beta_{2j} \text{Condition}_{ik} + \beta_{3j} \text{Task}_{ik} \times \text{Condition}_{ik} + u_{0j} + v_{0k}$$
+
+Condition level (Lv 2a) random slopes
+$$
+\begin{aligned}
+  \beta_{1j} = \gamma_{10} + + u_{1j} \\
+  \beta_{2j} = \gamma_{20} + u_{2j} \\
+  \beta_{3j} = \gamma_{30} + u_{3j} \\
+\end{aligned}
+$$
+
+#### 6.5.2 Fit a Model
+
+Now I fit another Bayesian multilevel model here. Note that this is a logistic model. Random slopes will also be included. 
+
+```{r}
+m1_acc <- 
+  brm(err ~ Task + Condition + Task*Condition + (Task + Condition + Task*Condition | Subject), 
+      data = ToM_acc, 
+      family = bernoulli("logit"), 
+      seed = 112314)
+summary(m1_acc)
+msummary(m1_acc, statistic = "conf.int", statistic_vertical = FALSE)
+```
+
+#### 6.6 Plotting
+
+```{r}
+m1_plots <- plot(
+  conditional_effects(
+    m1_acc
+  ), 
+  points = TRUE, 
+  point_args = c(height = 0.02, alpha = 0.3, size = 0.1), 
+  plot = FALSE
+)
+gridExtra::grid.arrange(grobs = m1_plots, ncol = 2)
+```
+
+#### 6.7 Interpretation
+
+For accuracy, participants still got more correct responses in Location Task than in Identity Task when they are in Condition AD+.
+As for condition, there is no significant difference between `ConditionAD_p` and other three conditions in Identity Task.
+In addition, we cannot find significant interactions between Task and Condition in accuracy. But we still see random slops of `Task` and `Condition` across `Subject`. In a nutshell, results of accuracy cannot support the hypotheses.
+
+
+
+
+
+
+
+
+
+
