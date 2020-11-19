@@ -2,10 +2,12 @@
 Course Project for PSYC575 Multilevel Modeling 
 
 
-Research design and data are from Edwards & Low (2017).
+This project is a replication of the data analysis of Edwards & Low (2017) using MLM. Research design and data are from Edwards & Low (2017).
+
+Edwards, K., & Low, J. (2017). Reaction time profiles of adults’ action prediction reveal two mindreading systems. Cognition, 160, 1-16.
 
 
-Data: 1-s2.0-S0010027716302906-mmc3.xlsx
+Data: Data can be found in the supplementary materials in the paper.
 
 
 For peer review:
@@ -22,4 +24,5 @@ For final presentation:
   Completed analysis: PSYC575_CourseProject_final.Rmd
 
   Completed report: PSYC575_CourseProject_final.pdf
+
 
